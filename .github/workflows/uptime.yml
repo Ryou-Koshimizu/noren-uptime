@@ -1,0 +1,56 @@
+name: uptime
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: 'yes にするとテスト用に失敗させる'
+        default: 'no'
+permissions:
+  issues: write
+  contents: write
+concurrency: uptime
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: サイトとAnalyticsを確認
+        id: chk
+        run: |
+          fail=""
+          check() { curl -sf -o /dev/null --max-time 25 --retry 2 --retry-delay 10 "$1" || fail="$fail $2"; }
+          if [ "${{ github.event.inputs.force_fail || 'no' }}" = "yes" ]; then
+            fail=" (手動テスト)"
+          else
+            check https://analytics.noren-ai.jp/ Analytics
+            check https://noren-ai.jp/ HP
+          fi
+          echo "fail=$fail" >> "$GITHUB_OUTPUT"
+      - name: 通知（ダウンでissue作成 / 回復で自動クローズ）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fail="${{ steps.chk.outputs.fail }}"
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label outage --json number --jq '.[0].number // empty')
+          if [ -n "$fail" ]; then
+            if [ -z "$open" ]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" --label outage \
+                --title "🔴 ダウン検知:$fail" \
+                --body "$(date -u '+%Y-%m-%d %H:%M') UTC に応答がありませんでした。15分おきに再確認し、回復したらこのissueは自動で閉じます。確認: https://analytics.noren-ai.jp / https://noren-ai.jp"
+            fi
+            exit 1
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --repo "$GITHUB_REPOSITORY" --comment "✅ 回復を確認（$(date -u '+%Y-%m-%d %H:%M') UTC）"
+          fi
+      - name: keep-alive（60日無活動でscheduleが止まるのを防ぐ）
+        if: always()
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $((20*86400)) ]; then
+            date -u > .heartbeat
+            git config user.name uptime-bot
+            git config user.email bot@noren-ai.jp
+            git add .heartbeat && git commit -m heartbeat && git push
+          fi
